@@ -1,0 +1,12 @@
+feature,mean_abs_shap
+demand_mw,0.8594306
+demand_3day_avg,0.6412551
+day_of_month,0.30713624
+day_of_week,0.3036734
+previous_demand,0.29618213
+load_shed_7day_avg,0.287272
+month,0.22968994
+demand_change,0.22195102
+previous_load_shed,0.22046882
+load_shed_3day_avg,0.103420176
+is_weekend,0.048775923
