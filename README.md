@@ -1,29 +1,33 @@
 # PowerGuard BD
 
-**An explainable AI system for next-day load-shedding risk prediction and intelligent backup-energy management in Bangladesh.**
+**Explainable AI for next-day load-shedding risk prediction and risk-aware backup energy management — Sylhet, Bangladesh (BPDB data, 2023–2025).**
 
-PowerGuard BD combines machine learning, SHAP-based explainability, a priority-based energy optimizer, and (planned) ESP32 hardware into one research prototype. The current implementation focuses on **Sylhet** using **BPDB area-wise demand and load-shedding records (2023–2025)**.
+PowerGuard BD is a research prototype that chains **data collection → feature engineering → XGBoost classification → SHAP explanations → priority-based load optimization**, with an interactive **Streamlit dashboard** that ties predictions to device recommendations.
 
-| Stage | Status |
+| Component | Status |
 | --- | --- |
-| Data collection & feature engineering | Complete |
-| Model training & comparison | Complete |
-| SHAP explainability | Complete |
-| Energy optimizer (prototype) | Complete |
-| Prediction → optimizer integration | In progress |
-| Django backend, dashboard, ESP32 demo | Planned |
+| BPDB scraping & merged datasets | Complete |
+| Sylhet feature engineering (3-year) | Complete |
+| Model comparison (LR, RF, XGBoost) | Complete |
+| Threshold tuning | Complete |
+| SHAP analysis & exports | Complete |
+| Standalone energy optimizer (`energy_optimizer.py`) | Complete |
+| Risk-aware optimizer v2 (`optimization/energy_optimizer_v2.py`) | Complete |
+| ML → optimizer CLI (`optimization/powerguard_system.py`) | Complete |
+| Streamlit dashboard (`optimization/app.py`) | Complete |
+| Django backend & ESP32 hardware demo | Planned |
 
 ---
 
 ## Table of contents
 
-- [Problem & approach](#problem--approach)
-- [Repository layout](#repository-layout)
-- [End-to-end pipeline](#end-to-end-pipeline)
-- [Data](#data)
+- [Overview](#overview)
+- [Repository structure](#repository-structure)
+- [Workflow](#workflow)
+- [Data & features](#data--features)
 - [Machine learning](#machine-learning)
 - [Explainable AI (SHAP)](#explainable-ai-shap)
-- [Energy management optimizer](#energy-management-optimizer)
+- [Energy management & dashboard](#energy-management--dashboard)
 - [Getting started](#getting-started)
 - [Roadmap](#roadmap)
 - [Technology stack](#technology-stack)
@@ -32,115 +36,132 @@ PowerGuard BD combines machine learning, SHAP-based explainability, a priority-b
 
 ---
 
-## Problem & approach
+## Overview
 
-Load shedding disrupts households, schools, small businesses, and infrastructure that depends on stable power. PowerGuard BD addresses preparedness in stages:
+Electricity load shedding affects homes, schools, clinics, and any environment that depends on continuous power. PowerGuard BD supports **preparedness** in two linked steps:
+
+1. **Predict** whether Sylhet is likely to experience load shedding on the **next day** (binary risk from historical BPDB area-wise records).
+2. **Explain** the prediction with SHAP, then **optimize** which demo loads to keep on a limited battery when risk is high, medium, or low.
 
 ```text
-BPDB area-wise electricity data
-            │
-            ▼
-   Merge, clean, feature engineering (Sylhet)
-            │
-            ▼
-   Classifiers (Logistic Regression, RF, XGBoost)
-            │
-            ▼
-   Next-day load-shedding risk (binary)
-            │
-            ▼
-   SHAP — why is risk high or low?
-            │
-            ▼
-   Energy optimizer — which loads to keep on backup?
-            │
-            ▼
-   (Planned) Django API, dashboard, ESP32 load control
+                    ┌──────────────────────────────────────┐
+                    │  BPDB area-wise demand / load shed   │
+                    └──────────────────┬───────────────────┘
+                                       ▼
+                    ┌──────────────────────────────────────┐
+                    │  merge_data → prepare_3year_dataset  │
+                    └──────────────────┬───────────────────┘
+                                       ▼
+                    ┌──────────────────────────────────────┐
+                    │  train_3year_models / threshold_tune │
+                    │  → xgboost_2025_predictions.csv      │
+                    └──────────────────┬───────────────────┘
+                                       ▼
+              ┌────────────────────────┴────────────────────────┐
+              ▼                                                 ▼
+   ┌─────────────────────┐                         ┌─────────────────────┐
+   │  shap_analysis.py   │                         │  optimization/      │
+   │  → shap_results/    │                         │  app.py (Streamlit) │
+   └─────────────────────┘                         │  powerguard_system  │
+                                                     └──────────┬──────────┘
+                                                                ▼
+                                                     Risk-aware device ON/OFF plan
 ```
 
-**Prediction target**
+**Target variable (`next_day_risk`)**
 
-| Label | Meaning |
-| --- | --- |
+| Value | Meaning |
+| ---: | --- |
 | `0` | No load shedding on the following day |
 | `1` | Load shedding on the following day |
 
 ---
 
-## Repository layout
-
-The project uses a **flat layout**: Python scripts, CSV datasets, and outputs live at the repository root (no nested `data/` or `models/` packages yet).
+## Repository structure
 
 ```text
 PowerGrid_BD/
 │
-├── collect_bpdb.py              # Scrape BPDB area-wise demand pages (by year)
-├── merge_data.py                # Merge yearly BPDB CSVs into one file
-├── check_data.py                # Data quality checks
-├── eda_bpdb.py                  # Exploratory plots (zone-level summaries)
+├── Data collection & preparation
+│   ├── collect_bpdb.py                 # Scrape BPDB area-wise pages (configurable year)
+│   ├── merge_data.py                   # Merge 2023–2025 yearly CSVs
+│   ├── check_data.py                   # Validation helpers
+│   ├── eda_bpdb.py                     # Zone-level EDA plots
+│   ├── prepare_dataset.py              # Earlier single-year Sylhet pipeline
+│   └── prepare_3year_dataset.py        # Builds primary modeling CSV
 │
-├── prepare_dataset.py           # Early Sylhet feature set (2024-focused workflow)
-├── prepare_3year_dataset.py     # Full 2023–2025 Sylhet prediction dataset
+├── Modeling & evaluation
+│   ├── train_models.py                 # Initial training workflow
+│   ├── train_3year_models.py           # LR / RF / XGBoost on 2023–24 train, 2025 test
+│   └── threshold_tuning.py             # XGBoost probability threshold search
 │
-├── train_models.py              # Initial model training workflow
-├── train_3year_models.py        # Train LR / RF / XGBoost; save comparison CSV
-├── threshold_tuning.py          # Decision-threshold search for XGBoost
+├── Explainability
+│   └── shap_analysis.py                # TreeExplainer, plots, CSV exports
 │
-├── shap_analysis.py             # SHAP values, plots, and CSV exports
-├── energy_optimizer.py          # Backup load selection under power budget
+├── Legacy optimizer (root)
+│   └── energy_optimizer.py             # Priority score, fixed demo scenario (no ML link)
 │
-├── bpdb_area_wise_2023.csv      # Raw BPDB extract (2023)
-├── bpdb_area_wise_2024.csv      # Raw BPDB extract (2024)
-├── bpdb_area_wise_2025.csv      # Raw BPDB extract (2025)
-├── bpdb_area_wise_2023_2025.csv # Merged multi-year raw data
+├── optimization/                       # Integrated risk → energy management
+│   ├── app.py                          # Streamlit UI: predict, optimize, SHAP panel
+│   ├── powerguard_system.py            # Interactive CLI: date + battery + duration
+│   ├── energy_optimizer_v2.py            # Risk-aware combinatorial optimizer (standalone demo)
+│   └── powerguard_system_backup.py     # Backup copy of integrated CLI logic
 │
-├── sylhet_prediction_dataset.csv           # Engineered Sylhet features (legacy path)
-├── sylhet_2023_2025_prediction_dataset.csv # Primary modeling dataset
+├── Raw & engineered data (CSV)
+│   ├── bpdb_area_wise_2023.csv
+│   ├── bpdb_area_wise_2024.csv
+│   ├── bpdb_area_wise_2025.csv
+│   ├── bpdb_area_wise_2023_2025.csv
+│   ├── sylhet_prediction_dataset.csv
+│   └── sylhet_2023_2025_prediction_dataset.csv   # Primary modeling file (938 rows)
 │
-├── model_comparison_2023_2025.csv # Test-set metrics (2025 holdout)
-├── xgboost_2025_predictions.csv   # XGBoost outputs for 2025 test days
+├── Model outputs
+│   ├── model_comparison_2023_2025.csv
+│   └── xgboost_2025_predictions.csv              # Dates, probs, labels for dashboard/CLI
 │
-├── shap_results/                  # SHAP artifacts (generated by shap_analysis.py)
+├── shap_results/
 │   ├── shap_feature_importance.csv
 │   ├── shap_values_2025.csv
-│   ├── shap_feature_importance_bar.png
-│   ├── shap_beeswarm.png
-│   └── shap_highest_risk_waterfall.png
+│   ├── shap_beeswarm.png                 # Script-generated beeswarm (2025 test set)
+│   ├── image.png                         # Dashboard: inputs & analyze control
+│   ├── img2.png                          # Dashboard: global SHAP feature table
+│   └── img3.png                          # Dashboard: bar + beeswarm SHAP views
 │
 ├── README.md
 └── .gitattributes
 ```
 
-Utility or scratch files (`Test.py`, `tempCodeRunnerFile.py`) are not part of the documented pipeline.
+Scratch or local-only files (`Test.py`, `tempCodeRunnerFile.py`, `optimization/tempCodeRunnerFile.py`) are not part of the documented pipeline.
+
+> **Note:** `shap_analysis.py` can also write `shap_feature_importance_bar.png` and `shap_highest_risk_waterfall.png` when run; the Streamlit app references those paths. The README figures below use the assets currently in `shap_results/`, including your dashboard screenshots.
 
 ---
 
-## End-to-end pipeline
+## Workflow
 
-Run scripts in roughly this order (adjust file paths inside each script if your clone is not on `D:\PowerGrid_BD`):
-
-| Step | Script | Output |
-| --- | --- | --- |
+| Step | Script | Main output |
+| ---: | --- | --- |
 | 1 | `collect_bpdb.py` | `bpdb_area_wise_<year>.csv` |
 | 2 | `merge_data.py` | `bpdb_area_wise_2023_2025.csv` |
 | 3 | `prepare_3year_dataset.py` | `sylhet_2023_2025_prediction_dataset.csv` |
 | 4 | `train_3year_models.py` | `model_comparison_2023_2025.csv` |
-| 5 | `threshold_tuning.py` | Console metrics; tuned threshold for deployment |
-| 6 | `shap_analysis.py` | `shap_results/` CSVs and PNG figures |
-| 7 | `energy_optimizer.py` | Console: optimal device subset for demo scenario |
+| 5 | `threshold_tuning.py` | Console metrics; tuned decision threshold |
+| 6 | `shap_analysis.py` | `shap_results/*.csv` and optional PNG plots |
+| 7 | `optimization/powerguard_system.py` **or** `optimization/app.py` | Risk level + recommended loads |
 
-Optional: `eda_bpdb.py` and `check_data.py` for exploration and validation.
+Optional: `eda_bpdb.py`, `check_data.py`, `energy_optimizer.py` (baseline optimizer without XGBoost input).
 
 ---
 
-## Data
+## Data & features
 
-- **Source:** [Bangladesh Power Development Board (BPDB)](https://misc.bpdb.gov.bd/area-wise-demand) area-wise demand and load-shedding publications.
-- **Geography:** Sylhet zone (filtered from national area-wise tables).
-- **Period:** 2023–2025 (938 daily rows in the engineered dataset after processing).
-- **Split:** Train on 2023–2024 (670 rows); evaluate on 2025 (268 rows).
+- **Source:** [BPDB area-wise demand](https://misc.bpdb.gov.bd/area-wise-demand) publications (scraped via `collect_bpdb.py`).
+- **Region:** Sylhet (`zone == "Sylhet"`).
+- **Horizon:** 2023–2025 daily records.
+- **Modeling file:** `sylhet_2023_2025_prediction_dataset.csv` — **938** rows after engineering.
+- **Split:** Train **2023–2024** (670 rows); test **2025** (268 rows). The 2025 test set is imbalanced (**253** negative vs **15** positive days).
 
-**Model features** (11 inputs → `next_day_risk`):
+**Features (11 → `next_day_risk`):**
 
 `demand_mw`, `previous_load_shed`, `load_shed_3day_avg`, `load_shed_7day_avg`, `previous_demand`, `demand_3day_avg`, `demand_change`, `day_of_week`, `month`, `day_of_month`, `is_weekend`
 
@@ -148,7 +169,7 @@ Optional: `eda_bpdb.py` and `check_data.py` for exploration and validation.
 
 ## Machine learning
 
-Three classifiers are compared on the **2025 holdout** with a default probability threshold of 0.5 (`train_3year_models.py`).
+Models are trained in `train_3year_models.py` with a default classification threshold of **0.5** on 2025 holdout probabilities.
 
 | Model | Accuracy | Precision | Recall | F1 | ROC-AUC | PR-AUC |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -156,17 +177,22 @@ Three classifiers are compared on the **2025 holdout** with a default probabilit
 | Random Forest | 0.642 | 0.107 | 0.733 | 0.186 | 0.761 | 0.155 |
 | **XGBoost** | **0.825** | 0.119 | 0.333 | 0.175 | 0.735 | **0.253** |
 
-**XGBoost** is the primary model (300 trees, `max_depth=4`, `learning_rate=0.05`). The test set is imbalanced (253 negative vs. 15 positive days in 2025), so accuracy alone is misleading; ROC-AUC, PR-AUC, recall, and threshold tuning (`threshold_tuning.py`) matter for operational use.
+**Primary model — XGBoost**
+
+- `n_estimators=300`, `max_depth=4`, `learning_rate=0.05`, `subsample=0.8`, `colsample_bytree=0.8`
+- Predictions for dashboard/CLI: `xgboost_2025_predictions.csv` (`predicted_probability`, `predicted_risk`, `next_day_risk`, etc.)
+
+Use **ROC-AUC**, **PR-AUC**, recall, and `threshold_tuning.py` alongside accuracy because of class imbalance.
 
 ---
 
 ## Explainable AI (SHAP)
 
-[`shap_analysis.py`](shap_analysis.py) retrains the same XGBoost specification on 2023–2024, explains **2025 test predictions** with `shap.TreeExplainer`, and writes tables plus publication-quality figures to [`shap_results/`](shap_results/).
+[`shap_analysis.py`](shap_analysis.py) retrains the same XGBoost setup on 2023–2024 and computes SHAP values for **every 2025 test day** using `shap.TreeExplainer`.
 
-SHAP answers: *Which features pushed the model toward higher or lower risk for a given day?* Feature contributions describe the **model**, not proven causal mechanisms.
+SHAP shows **how the model used each feature** for a prediction. It does **not** by itself prove causal relationships in the grid.
 
-### Global feature importance (mean |SHAP|)
+### Global importance (mean |SHAP| on 2025 test set)
 
 | Rank | Feature | Mean \|SHAP\| |
 | ---: | --- | ---: |
@@ -182,42 +208,54 @@ SHAP answers: *Which features pushed the model toward higher or lower risk for a
 | 10 | `load_shed_3day_avg` | 0.103 |
 | 11 | `is_weekend` | 0.049 |
 
-Demand-related signals dominate; calendar features add secondary structure.
+**Interpretation:** Current and smoothed **demand** dominate; calendar and recent load-shed history add secondary signal. High demand (red in beeswarm plots) tends to push risk upward.
 
-### SHAP visualizations
+### Artifacts
 
-**Bar plot — average impact magnitude across 2025 test days**
+| File | Description |
+| --- | --- |
+| `shap_results/shap_feature_importance.csv` | Sorted global importance |
+| `shap_results/shap_values_2025.csv` | Per-day SHAP contributions + probabilities + labels |
 
-![SHAP feature importance bar plot](shap_results/shap_feature_importance_bar.png)
-
-**Beeswarm plot — direction of effect (feature value vs. SHAP value)**
-
-![SHAP beeswarm summary plot](shap_results/shap_beeswarm.png)
-
-**Waterfall plot — explanation for the highest predicted-risk day in 2025**
-
-On **2025-10-15**, the model assigned probability **0.946** (actual next-day risk: **1**).
-
-![SHAP waterfall for highest-risk 2025 prediction](shap_results/shap_highest_risk_waterfall.png)
-
-**Exported data**
-
-- `shap_results/shap_feature_importance.csv` — global ranking
-- `shap_results/shap_values_2025.csv` — per-day SHAP values, probabilities, and labels
-
-Regenerate figures after model or data changes:
+Regenerate after data or model changes:
 
 ```bash
 python shap_analysis.py
 ```
 
+### Visualizations
+
+**Standalone SHAP beeswarm** (matplotlib export from `shap_analysis.py` — feature value vs. impact on model output):
+
+![SHAP beeswarm — Sylhet next-day load-shedding risk](shap_results/shap_beeswarm.png)
+
+**Streamlit dashboard — energy inputs and analysis entry point:**
+
+![PowerGuard BD Streamlit — prediction date, battery, outage duration](shap_results/image.png)
+
+**Streamlit — Explainable AI panel with global SHAP table:**
+
+![Global SHAP feature importance in the dashboard](shap_results/img2.png)
+
+**Streamlit — combined SHAP bar and beeswarm views:**
+
+![SHAP bar plot and beeswarm plot side by side](shap_results/img3.png)
+
+Example high-risk case from analysis: **2025-10-15**, predicted probability **≈ 0.946**, actual next-day risk **1** (waterfall plot available after running `shap_analysis.py`).
+
 ---
 
-## Energy management optimizer
+## Energy management & dashboard
 
-[`energy_optimizer.py`](energy_optimizer.py) is a discrete search over device on/off combinations. It maximizes **priority score** subject to average power × outage duration ≤ battery capacity (demo: 100 Wh, 3 h outage).
+### Risk levels (used in `optimization/`)
 
-Example device table:
+| Level | Condition (`predicted_probability`) | Load policy (summary) |
+| --- | --- | --- |
+| **HIGH** | ≥ 0.80 | Essential (priority 1) only — e.g. router, LED |
+| **MEDIUM** | ≥ 0.50 | Priority 1 and 2; exclude priority 3 |
+| **LOW** | &lt; 0.50 | Maximize priority score within battery budget |
+
+### Demo device catalog
 
 | Device | Power (W) | Priority |
 | --- | ---: | ---: |
@@ -227,107 +265,104 @@ Example device table:
 | Laptop | 45 | 2 |
 | Extra Light | 10 | 3 |
 
-Next step: feed **predicted risk and expected duration** from the ML pipeline into this optimizer automatically.
+Optimization is a **combinatorial search** over ON/OFF states subject to  
+`total_power × outage_hours ≤ battery_capacity_wh`.
+
+### Modules
+
+| File | Role |
+| --- | --- |
+| [`energy_optimizer.py`](energy_optimizer.py) | Original prototype: fixed scenario, priority score only |
+| [`optimization/energy_optimizer_v2.py`](optimization/energy_optimizer_v2.py) | Risk-aware scoring (standalone numeric demo) |
+| [`optimization/powerguard_system.py`](optimization/powerguard_system.py) | CLI: pick date from `xgboost_2025_predictions.csv`, enter battery & duration, print plan |
+| [`optimization/app.py`](optimization/app.py) | **Streamlit** dashboard: metrics, load table, SHAP section |
+
+### Run the dashboard
+
+```bash
+pip install streamlit pandas
+streamlit run optimization/app.py
+```
+
+Set **Prediction Date**, **Battery Capacity (Wh)**, and **Expected Outage Duration**, then **Analyze & Optimize**. The app loads predictions from `xgboost_2025_predictions.csv` and SHAP tables/images from `shap_results/`.
 
 ---
 
 ## Getting started
 
-### Prerequisites
+### Requirements
 
-- Python 3.10+ recommended
-- Dependencies used across the pipeline:
-
-```text
-pandas numpy scikit-learn xgboost shap matplotlib requests beautifulsoup4 urllib3
-```
-
-Install example:
+Python **3.10+** recommended.
 
 ```bash
-pip install pandas numpy scikit-learn xgboost shap matplotlib requests beautifulsoup4
+pip install pandas numpy scikit-learn xgboost shap matplotlib requests beautifulsoup4 streamlit
 ```
 
-### Quick run (existing data)
-
-If CSVs are already present:
+### Reproduce core results (CSVs already in repo)
 
 ```bash
 python train_3year_models.py
 python shap_analysis.py
-python energy_optimizer.py
+streamlit run optimization/app.py
 ```
 
 ### Paths
 
-Several scripts use absolute paths such as `D:\PowerGrid_BD\...`. Clone the repo to that location or edit paths at the top of each script to match your environment.
+Many scripts use absolute paths (`D:\PowerGrid_BD\...`). Clone to that path or update path constants at the top of:
 
-### Planned architecture
-
-Future backend and hardware integration (not yet in this repository):
-
-```text
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│ BPDB / CSV  │ ──► │ Django REST  │ ──► │ Dashboard   │
-└─────────────┘     │ + XGBoost    │     └─────────────┘
-                    │ + SHAP       │            │
-                    │ + Optimizer  │            ▼
-                    └──────┬───────┘     ┌─────────────┐
-                           └───────────► │ ESP32 demo  │
-                                         └─────────────┘
-```
+- `shap_analysis.py`
+- `optimization/app.py`
+- `optimization/powerguard_system.py`
+- `merge_data.py`, `prepare_3year_dataset.py`, etc.
 
 ---
 
 ## Roadmap
 
-### Phase 1 — Data & AI
+### Phase 1 — Data & AI ✅
 
-- [x] Collect and merge BPDB area-wise data
-- [x] Engineer Sylhet temporal and rolling features
-- [x] Train and compare Logistic Regression, Random Forest, XGBoost
-- [x] SHAP analysis and exported explanations
+- [x] BPDB collection and multi-year merge
+- [x] Sylhet feature engineering
+- [x] Model comparison and XGBoost selection
+- [x] SHAP exports and visualizations
 
-### Phase 2 — Intelligent energy management
+### Phase 2 — Intelligent energy management 🚧
 
-- [x] Prototype priority-based optimizer
-- [ ] Wire ML risk scores and duration estimates into the optimizer
-- [ ] Scenario tests (battery size, outage length, device lists)
+- [x] Baseline and risk-aware optimizers
+- [x] CLI and Streamlit integration with XGBoost outputs
+- [ ] Live retraining pipeline (not only 2025 CSV)
+- [ ] User-defined device lists and priorities in UI
+- [ ] Outage duration estimated from ML / historical stats
 
-### Phase 3 — Software platform
+### Phase 3 — Platform & hardware ⏳
 
-- [ ] Django REST API
-- [ ] Dashboard with predictions and SHAP summaries
-- [ ] User-configurable devices and battery parameters
-
-### Phase 4 — Hardware demonstration
-
-- [ ] ESP32, INA219 sensing, relay control (low-voltage DC demo loads)
-- [ ] End-to-end test: prediction → plan → physical load shedding
+- [ ] Django REST API (optional migration from Streamlit)
+- [ ] ESP32 + INA219 + relay demo (low-voltage DC loads only)
+- [ ] End-to-end field-style demonstration
 
 ---
 
 ## Technology stack
 
-| Layer | Tools |
+| Area | Tools |
 | --- | --- |
-| Language | Python; C/C++ (planned for ESP32) |
-| ML | scikit-learn, XGBoost, SHAP |
+| Language | Python |
+| ML | scikit-learn, XGBoost |
+| XAI | SHAP |
 | Data | pandas, NumPy |
-| Viz | matplotlib, SHAP plots |
-| Collection | requests, BeautifulSoup |
-| Backend (planned) | Django, Django REST Framework |
-| Frontend (planned) | HTML, CSS, Bootstrap, JavaScript, Chart.js |
-| Hardware (planned) | ESP32, INA219, relays, DC loads, battery bank |
+| Visualization | matplotlib, SHAP plots |
+| Web UI | Streamlit |
+| Data collection | requests, BeautifulSoup |
+| Planned | Django, ESP32, INA219 |
 
 ---
 
 ## Scope & disclaimer
 
-- Predictions are **area-level (Sylhet) next-day risk**, not household-level outage schedules.
-- Models are **research prototypes**; do not treat outputs as official grid operations guidance.
-- The hardware concept targets **low-voltage demonstration**, not direct switching of household 220 V AC.
-- SHAP values explain model behavior; they are not causal proof.
+- Predictions are **Sylhet area-level next-day risk**, not exact household outage times.
+- Outputs are **research prototypes**, not operational guidance for BPDB or the national grid.
+- Hardware plans target **safe low-voltage demonstration**, not direct 220 V AC switching.
+- SHAP explains the **model**; feature effects are not guaranteed causal facts.
 
 **Vision:** *Predict the risk. Explain the reason. Protect the essential loads.*
 
@@ -336,5 +371,5 @@ Future backend and hardware integration (not yet in this repository):
 ## Author
 
 **Kushal Panthadas**  
-North East University 
-Dept of Computer Science & Engineering, Bangladesh
+North East University  
+Department of Computer Science & Engineering, Bangladesh
